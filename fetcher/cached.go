@@ -15,18 +15,18 @@ type cachedConcurrentFetcher struct {
 }
 
 func (c *cachedConcurrentFetcher) getCachedValue(url string) (urlStateCacheRec, bool) {
-	// try to get value from cache with lock
-	c.Lock()
-	defer c.Unlock()
-
 	rec, ok := c.cache[url]
 	return rec, ok
 }
 
-func (c *cachedConcurrentFetcher) getOrCreateWaiter(url string) (chan struct{}, bool) {
+func (c *cachedConcurrentFetcher) getCachedValueWithLock(url string) (urlStateCacheRec, bool) {
 	c.Lock()
 	defer c.Unlock()
 
+	return c.getCachedValue(url)
+}
+
+func (c *cachedConcurrentFetcher) getOrCreateWaiter(url string) (waiter chan struct{}, found bool) {
 	var w chan struct{}
 	var ok bool
 
@@ -39,26 +39,32 @@ func (c *cachedConcurrentFetcher) getOrCreateWaiter(url string) (chan struct{}, 
 
 func (c *cachedConcurrentFetcher) fetch(url string) (int, error) {
 	var (
-		rec            urlStateCacheRec
-		ok             bool
-		waiter         chan struct{}
-		existingWaiter bool
+		rec         urlStateCacheRec
+		ok          bool
+		waiter      chan struct{}
+		foundWaiter bool
 	)
 
+	// complex lock with two different places to unlock
+	c.Lock()
 	rec, ok = c.getCachedValue(url)
 	if ok {
+		// found cached value, lock not needed anymore
+		c.Unlock()
 		return rec.Stat, rec.Err
 	}
 
 	// don't have cached value
 	// let's check whether someone is fetching this URL right now or not
-	waiter, existingWaiter = c.getOrCreateWaiter(url)
+	// should be done inside lock
+	waiter, foundWaiter = c.getOrCreateWaiter(url)
+	c.Unlock()
 
-	if existingWaiter {
+	if foundWaiter {
 		// wait until other goroutine will fetch URL and close waiter
 		<-waiter
 
-		rec, _ = c.getCachedValue(url)
+		rec, _ = c.getCachedValueWithLock(url)
 		return rec.Stat, rec.Err
 	} else {
 		// this is fetching goroutine, call fetch, put value in cache and close waiter
